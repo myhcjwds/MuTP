@@ -39,9 +39,9 @@ class TKBCModel(nn.Module, ABC):
             c_begin = 0
             while c_begin < self.sizes[2]:
                 b_begin = 0
-                rhs = self.get_rhs(c_begin, chunk_size)  # 将输入进来的训练集分为几个batch
+                rhs = self.get_rhs(c_begin, chunk_size)
                 while b_begin < len(queries):
-                    if queries.shape[1] > 4:  # time intervals exist   对五元组中时间戳的处理
+                    if queries.shape[1] > 4:
                         these_queries = queries[b_begin:b_begin + batch_size]
                         start_queries = []
                         end_queries = []
@@ -60,7 +60,7 @@ class TKBCModel(nn.Module, ABC):
                                 end = -int(triple[4].split('-')[1].replace('#', '0'))
                             elif triple[4][0] != '-':
                                 end = int(triple[4].split('-')[0].replace('#', '0'))
-                            for key, time_idx in sorted(year2id.items(), key=lambda x: x[1]):  # 时间戳转换成id
+                            for key, time_idx in sorted(year2id.items(), key=lambda x: x[1]):
                                 if start >= key[0] and start <= key[1]:
                                     start_idx = time_idx
                                 if end >= key[0] and end <= key[1]:
@@ -150,7 +150,7 @@ class MuTP(TKBCModel):
 
         self.embeddings = nn.ModuleList([
             nn.Embedding(s, 2 * rank, sparse=True)
-            for s in [sizes[0], sizes[1], sizes[3]]  # without no_time_emb
+            for s in [sizes[0], sizes[1], sizes[3]]
         ])
         self.embeddings[0].weight.data *= init_size
         self.embeddings[1].weight.data *= init_size
@@ -195,9 +195,9 @@ class MuTP(TKBCModel):
         rot_even = x_even * cos - x_odd * sin
         rot_odd = x_even * sin + x_odd * cos
 
-        time_rot = torch.stack((rot_even, rot_odd), dim=-1).flatten(-2)  # [B, padded_rank]
+        time_rot = torch.stack((rot_even, rot_odd), dim=-1).flatten(-2)
         if dim % 2 == 1:
-            time_rot = time_rot[..., :dim]  # remove padding
+            time_rot = time_rot[..., :dim]
 
         return time_rot
 
