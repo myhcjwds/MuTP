@@ -159,8 +159,10 @@ class MuTP(TKBCModel):
         n_entities, n_relations, _, n_timestamps = sizes
         self.n_timestamps = n_timestamps
 
-        self.time_base_emb = nn.Embedding(n_timestamps, rank)
+        self.time_base_emb = nn.Embedding(n_timestamps + 1, rank)  # +1 作为锚点
         self.time_base_emb.weight.data *= init_size
+
+        self.gate = nn.Parameter(torch.tensor(0.1))  # 门控参数
 
         base_inv_freq = 1.0 / (10000 ** (torch.arange(0, rank, 2).float() / rank))
         self.register_buffer("base_inv_freq", base_inv_freq)
@@ -201,19 +203,25 @@ class MuTP(TKBCModel):
 
         return time_rot
 
-    def _time_multi_scale(self, rel_ids: torch.Tensor, time_ids: torch.Tensor):
+    def _time_multi_scale(self, rel_ids: torch.Tensor, time_ids: torch.Tensor, time_raw: torch.Tensor):
         time_scales_list = []
-        
+
         for scale_idx in range(self.n_scales):
             freq_factor = self.scale_freq_factors[scale_idx]
             inv_freq = self.base_inv_freq / freq_factor
-            time_rot = self._rope_time_scale(time_ids, inv_freq)
-            time_scales_list.append(time_rot)
+            time_rot = self._rope_time_scale(time_ids, inv_freq)  # [B, rank]
+            anchor_rot = self._rope_time_scale(
+                torch.tensor([self.n_timestamps], device=time_ids.device), inv_freq
+            ).squeeze(0)  # [rank]
+            time_anchor = torch.sum(time_rot * anchor_rot, dim=-1, keepdim=True)  # [B, 1]
+            time_fused = time_raw + torch.tanh(time_anchor) * time_rot
+
+            time_scales_list.append(time_fused)
+
         time_scales = torch.stack(time_scales_list, dim=1)  # [B, n_scales, rank]
-        
         scale_logits = self.rel_scale_weights(rel_ids)  # [B, n_scales]
         scale_weights = torch.softmax(scale_logits, dim=-1).unsqueeze(-1)  # [B, n_scales, 1]
-        
+
         return time_scales, scale_weights
 
     def score(self, x):
@@ -228,7 +236,7 @@ class MuTP(TKBCModel):
         rhs = rhs[:, :self.rank], rhs[:, self.rank:]
         time = time[:, :self.rank], time[:, self.rank:]
 
-        time_scales, scale_weights = self._time_multi_scale(x[:, 1], x[:, 3])
+        time_scales, scale_weights = self._time_multi_scale(x[:, 1], x[:, 3], time[0])
 
         rel_expanded = rel[0].unsqueeze(1)
         time_phase_expanded = time[1].unsqueeze(1)
@@ -253,7 +261,7 @@ class MuTP(TKBCModel):
         rel = rel[:, :self.rank] / (1 / self.pi), rel[:, self.rank:] / (1 / self.pi)
         time = time[:, :self.rank], time[:, self.rank:]
 
-        time_scales, scale_weights = self._time_multi_scale(x[:, 1], x[:, 3])
+        time_scales, scale_weights = self._time_multi_scale(x[:, 1], x[:, 3], time[0])
 
         rel_expanded = rel[0].unsqueeze(1)  # [B, rank]--->[B, 1, rank]
         time_phase_expanded = time[1].unsqueeze(1)  # [B, rank]--->[B, 1, rank]
@@ -285,7 +293,7 @@ class MuTP(TKBCModel):
         rel = rel[:, :self.rank] / (1 / self.pi), rel[:, self.rank:] / (1 / self.pi)
         time = time[:, :self.rank], time[:, self.rank:]
 
-        time_scales, scale_weights = self._time_multi_scale(queries[:, 1], queries[:, 3])
+        time_scales, scale_weights = self._time_multi_scale(queries[:, 1], queries[:, 3], time[0])
 
         rel_expanded = rel[0].unsqueeze(1)  # [B, 1, rank]
         time_phase_expanded = time[1].unsqueeze(1)  # [B, 1, rank]
@@ -295,3 +303,35 @@ class MuTP(TKBCModel):
         rt = rt_0, rel[1]
         return (lhs[0] + rt[1]) * rt[0]
 
+    def get_simi_queries(self, queries: torch.Tensor):
+        lhs = self.embeddings[0](queries[:, 0])
+        rel = self.embeddings[1](queries[:, 1])
+        time = self.embeddings[2](queries[:, 3])
+
+        lhs = lhs[:, :self.rank], lhs[:, self.rank:]
+        rel = rel[:, :self.rank] / (1 / self.pi), rel[:, self.rank:] / (1 / self.pi)
+        time = time[:, :self.rank], time[:, self.rank:]
+
+        time_scales, scale_weights = self._time_multi_scale(queries[:, 1], queries[:, 3], time[0])
+
+        rel_expanded = rel[0].unsqueeze(1)  # [B, 1, rank]
+        time_phase_expanded = time[1].unsqueeze(1)  # [B, 1, rank]
+        rt_all = (rel_expanded + time_scales) * time_phase_expanded  # [B, n_scales, rank]
+        rt_0 = (scale_weights * rt_all).sum(dim=1)  # [B, rank]
+
+        rt = rt_0, rel[1]
+        return (lhs[0] + rt[1])
+
+    def get_tcom_queries(self, queries: torch.Tensor):
+        lhs = self.embeddings[0](queries[:, 0])
+        rel = self.embeddings[1](queries[:, 1])
+        time = self.embeddings[2](queries[:, 3])
+
+        lhs = lhs[:, :self.rank], lhs[:, self.rank:]
+        rel = rel[:, :self.rank] / (1 / self.pi), rel[:, self.rank:] / (1 / self.pi)
+        time = time[:, :self.rank], time[:, self.rank:]
+
+        rt_0 = (rel[0] + time[1]) * time[0]
+
+        rt = rt_0, rel[1]
+        return (lhs[0] + rt[1]) * rt[0]
